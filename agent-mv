@@ -212,8 +212,24 @@ def live_processes(target, names):
         except OSError:
             continue
         if cwd and is_under(cwd, target):
-            found.append((pid, " ".join(args)[:100]))
+            found.append((pid, " ".join(args)[:100], _tty_name(pid)))
     return found
+
+
+def _tty_name(pid):
+    """The terminal a process is attached to, e.g. 'pts/21', or None.
+
+    Field 7 of /proc/<pid>/stat; the comm field can contain spaces and
+    parentheses, so parse after the last ')'.
+    """
+    try:
+        with open(f"/proc/{pid}/stat", encoding="utf-8", errors="replace") as fh:
+            data = fh.read()
+        rest = data[data.rindex(")") + 2:].split()
+        tty_nr = int(rest[4])
+    except (OSError, ValueError, IndexError):
+        return None
+    return f"pts/{tty_nr & 0xff}" if tty_nr else None
 
 
 # ------------------------------------------------------------------- main ----
@@ -290,8 +306,15 @@ def main(argv=None):
             continue
         live = live_processes(old, agent["processes"])
         if live:
-            blocked.append((agent, "\n".join(
-                f"      pid {pid}: {cmd}" for pid, cmd in live)))
+            # no rich description from this tool, so at least say how to act
+            plain = []
+            for pid, cmd, tty in live:
+                plain.append(f"      pid {pid}: {cmd}")
+                if tty:
+                    plain.append(f"        find it : echo '>>> close this one <<<'"
+                                 f" > /dev/{tty}")
+                plain.append(f"        close it: kill {pid}")
+            blocked.append((agent, "\n".join(plain)))
     if blocked:
         detail = "\n".join(f"    {agent['name']}:\n{text}"
                            for agent, text in blocked)

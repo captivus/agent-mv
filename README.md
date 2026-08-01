@@ -88,7 +88,19 @@ conversation instead:
           about   : "Okay, so I am trying to design both branding and then the..."
 ```
 
-Tools without that hook fall back to a plain pid listing.
+Each session also carries the two commands that resolve it:
+
+```
+          find it : echo '>>> close this one <<<' > /dev/pts/21
+          close it: kill 698721
+```
+
+`find it` prints a marker into that terminal, which is the only reliable way to
+spot the window when one emulator process serves them all; `close it` ends the
+session as closing the tab would.
+
+Tools without the `describe_live` hook fall back to a plain pid listing, which
+carries the same two commands.
 
 ## Safety
 

@@ -232,6 +232,28 @@ class DetectionTests(unittest.TestCase):
             proc.kill()
             proc.wait()
 
+    def test_guard_says_how_to_close_the_blocking_session(self):
+        """Even without a rich description, the output must be actionable."""
+        f = Fixture(self.tmp, claude=True, codex=False)
+        fake_bin = os.path.join(self.tmp, "fakebin3")
+        os.makedirs(fake_bin, exist_ok=True)
+        fake = os.path.join(fake_bin, "claude")
+        with open(fake, "w") as fh:
+            fh.write("#!/bin/sh\nsleep 30\n")
+        os.chmod(fake, 0o755)
+        proc = subprocess.Popen([fake], cwd=f.old,
+                                stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL)
+        try:
+            time.sleep(0.4)
+            r = f.run("--dry-run")
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn("close it: kill", r.stderr)
+            self.assertIn(str(proc.pid), r.stderr)
+        finally:
+            proc.kill()
+            proc.wait()
+
     def test_refuses_while_an_agent_is_running_in_the_project(self):
         f = Fixture(self.tmp)
         fake_bin = os.path.join(self.tmp, "fakebin")
