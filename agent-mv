@@ -1,0 +1,334 @@
+#!/usr/bin/env python3
+"""agent-mv
+
+Rename a project directory and repoint every AI agent's history with it.
+
+Usage:
+  agent-mv [options] OLD_PATH NEW_PATH
+
+Options:
+  -n, --dry-run       Show what would be done, but don't make any changes.
+  -y, --yes           Skip the confirmation prompt (assume "yes").
+      --no-color      Disable ANSI colour output.
+  -h, --help          Display this help.
+      --version       Print the version.
+
+Example:
+  agent-mv -y ~/projects/old-name ~/projects/new-name
+
+Exit status: 0 success, non-zero on error.
+
+Why this exists:
+  Every agent keys its history to the project's path, in its own way, and each
+  agent's rename tool wants to move the directory itself - so only the first
+  one can run. This moves the directory once, then hands each agent's tool its
+  own job via --no-move.
+
+  The agents are handled by their own tools, not reimplemented here:
+    Claude Code  ->  claude-mv   (https://github.com/captivus/claude-mv)
+    Codex        ->  codex-mv    (https://github.com/captivus/codex-mv)
+"""
+
+import argparse
+import os
+import shutil
+import subprocess
+import sys
+
+VERSION = "1.0.0"
+
+
+# ---------------------------------------------------------------- output ----
+class Out:
+    def __init__(self, color=True):
+        enabled = color and sys.stderr.isatty() and not os.environ.get("NO_COLOR")
+        self.RED = "\033[31m" if enabled else ""
+        self.GREEN = "\033[32m" if enabled else ""
+        self.YELLOW = "\033[33m" if enabled else ""
+        self.CYAN = "\033[36m" if enabled else ""
+        self.BOLD = "\033[1m" if enabled else ""
+        self.RESET = "\033[0m" if enabled else ""
+
+    def info(self, msg):
+        print(f"{self.CYAN}{msg}{self.RESET}", file=sys.stderr)
+
+    def warn(self, msg):
+        print(f"{self.YELLOW}! {msg}{self.RESET}", file=sys.stderr)
+
+    def success(self, msg):
+        print(f"{self.GREEN}+ {msg}{self.RESET}", file=sys.stderr)
+
+    def error(self, msg, code=1):
+        print(f"{self.RED}x {msg}{self.RESET}", file=sys.stderr)
+        sys.exit(code)
+
+
+# ------------------------------------------------------------- path utils ----
+def abs_path(p):
+    return os.path.abspath(os.path.expanduser(str(p).rstrip("/") or "/"))
+
+
+def is_under(path, base):
+    return path == base or path.startswith(base + os.sep)
+
+
+# ------------------------------------------------------------------ agents ----
+def claude_home():
+    return abs_path(os.environ.get("CLAUDE_CONFIG_DIR")
+                    or os.path.join(os.path.expanduser("~"), ".claude"))
+
+
+def codex_home():
+    return abs_path(os.environ.get("CODEX_HOME")
+                    or os.path.join(os.path.expanduser("~"), ".codex"))
+
+
+def claude_encode(path):
+    """Claude Code's history directory name for a project path."""
+    for ch in "_. ":
+        path = path.replace(ch, "-")
+    return path.replace("/", "-")
+
+
+def claude_history(old):
+    """The Claude history directory for this project, if it exists."""
+    path = os.path.join(claude_home(), "projects", claude_encode(old))
+    return path if os.path.isdir(path) else None
+
+
+def codex_sessions(old):
+    """How many Codex sessions belong to this project.
+
+    Reads session_meta.cwd, the same source of truth codex-mv uses, rather
+    than the sqlite cache - which is derived and can be stale.
+    """
+    import json
+    sessions = os.path.join(codex_home(), "sessions")
+    if not os.path.isdir(sessions):
+        return 0
+    count = 0
+    for root, _dirs, files in os.walk(sessions):
+        for name in files:
+            if not name.endswith(".jsonl"):
+                continue
+            try:
+                with open(os.path.join(root, name), encoding="utf-8",
+                          errors="replace") as fh:
+                    for i, line in enumerate(fh):
+                        if i >= 10:
+                            break
+                        line = line.strip()
+                        if not line:
+                            continue
+                        obj = json.loads(line)
+                        if obj.get("type") == "session_meta":
+                            cwd = (obj.get("payload") or {}).get("cwd")
+                            if isinstance(cwd, str) and is_under(cwd, old):
+                                count += 1
+                            break
+            except (OSError, ValueError):
+                continue
+    return count
+
+
+AGENTS = [
+    {
+        "name": "Claude Code",
+        "tool": "claude-mv",
+        "repo": "https://github.com/captivus/claude-mv",
+        "processes": ("claude",),
+        "detect": lambda old: (1 if claude_history(old) else 0),
+        "describe": lambda n: f"{n} history directory",
+    },
+    {
+        "name": "Codex",
+        "tool": "codex-mv",
+        "repo": "https://github.com/captivus/codex-mv",
+        "processes": ("codex",),
+        "detect": codex_sessions,
+        "describe": lambda n: f"{n} session(s)",
+    },
+]
+
+
+# --------------------------------------------------------- live processes ----
+def live_processes(target, names):
+    """Agent processes working inside `target`.
+
+    This has to run *before* the directory moves: afterwards a live process's
+    /proc/<pid>/cwd resolves to the new path, and a check against the old one
+    would find nothing.
+    """
+    found = []
+    if not os.path.isdir("/proc"):
+        return found
+    self_pid = os.getpid()
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        pid = int(entry)
+        if pid == self_pid:
+            continue
+        try:
+            with open(f"/proc/{pid}/cmdline", "rb") as fh:
+                argv = fh.read().split(b"\0")
+        except OSError:
+            continue
+        args = [a.decode("utf-8", "replace") for a in argv if a]
+        if not args:
+            continue
+        exe = os.path.basename(args[0])
+        head = [os.path.basename(a) for a in args[:2]]
+        if not any(n in exe or n in head for n in names):
+            continue
+        try:
+            cwd = os.path.realpath(f"/proc/{pid}/cwd")
+        except OSError:
+            continue
+        if cwd and is_under(cwd, target):
+            found.append((pid, " ".join(args)[:100]))
+    return found
+
+
+# ------------------------------------------------------------------- main ----
+def main(argv=None):
+    parser = argparse.ArgumentParser(prog="agent-mv", add_help=False)
+    parser.add_argument("paths", nargs="*")
+    parser.add_argument("-n", "--dry-run", action="store_true")
+    parser.add_argument("-y", "--yes", action="store_true")
+    parser.add_argument("--no-color", action="store_true")
+    parser.add_argument("--version", action="store_true")
+    parser.add_argument("-h", "--help", action="store_true")
+    args = parser.parse_args(argv)
+
+    out = Out(color=not args.no_color)
+    if args.help:
+        print(__doc__.strip())
+        return 0
+    if args.version:
+        print(f"agent-mv {VERSION}")
+        return 0
+    if len(args.paths) != 2:
+        print(__doc__.strip())
+        return 2
+
+    old = abs_path(args.paths[0])
+    new = abs_path(args.paths[1])
+
+    if old == new:
+        out.error("OLD_PATH and NEW_PATH are identical.")
+    if not os.path.isdir(old):
+        out.error(f"Source directory not found: {old}")
+    if os.path.exists(new):
+        out.error(f"Destination already exists: {new}")
+    if is_under(new, old):
+        out.error("NEW_PATH cannot be inside OLD_PATH.")
+
+    # ------------------------------------------------ which agents apply ----
+    present, missing_tools = [], []
+    for agent in AGENTS:
+        count = agent["detect"](old)
+        if not count:
+            continue
+        if not shutil.which(agent["tool"]):
+            missing_tools.append(agent)
+            continue
+        present.append((agent, count))
+
+    out.info("Planned actions:")
+    out.info(f"  Project dir : {old} -> {new}")
+    for agent, count in present:
+        out.info(f"  {agent['name']:11s} : {agent['describe'](count)}"
+                 f"  (via {agent['tool']})")
+    if not present and not missing_tools:
+        out.warn("No agent history found for this project - "
+                 "only the directory will be renamed.")
+
+    if missing_tools:
+        out.error(
+            "History found for an agent whose tool is not installed:\n"
+            + "\n".join(f"    {a['name']}: needs {a['tool']}  ({a['repo']})"
+                        for a in missing_tools)
+            + "\n  Refusing to move the directory, which would orphan it.")
+
+    # ------------------------------------------------------------ guards ----
+    blocked = []
+    for agent, _count in present:
+        live = live_processes(old, agent["processes"])
+        if live:
+            blocked.append((agent, live))
+    if blocked:
+        detail = "\n".join(
+            f"    {agent['name']}:\n"
+            + "\n".join(f"      pid {pid}: {cmd}" for pid, cmd in live)
+            for agent, live in blocked)
+        if args.dry_run:
+            out.warn("An agent is running in this project - "
+                     f"a real run would refuse:\n{detail}")
+        else:
+            out.error("An agent is running in this project - "
+                      f"refusing to touch its data:\n{detail}"
+                      "\n  Close those sessions and try again.")
+
+    if args.dry_run:
+        for agent, _count in present:
+            out.info(f"  Would run: {agent['tool']} --no-move {old} {new}")
+        out.info("Dry-run complete - no changes made.")
+        return 0
+
+    if not args.yes:
+        try:
+            reply = input(f"{out.BOLD}Proceed? [y/N] {out.RESET}")
+        except EOFError:
+            reply = ""
+        if reply.strip().lower() not in ("y", "yes"):
+            out.info("Aborted.")
+            return 0
+
+    # ---------------------------------------------------------- movement ----
+    try:
+        here = os.path.realpath(os.getcwd())
+    except OSError:
+        here = None
+    if here and is_under(here, old):
+        os.chdir("/")
+
+    try:
+        shutil.move(old, new)
+    except OSError as exc:
+        out.error(f"Could not rename project directory: {exc}")
+    out.success("Project directory renamed.")
+
+    # ------------------------------------------------ delegate per agent ----
+    # The directory has moved, so every tool runs with --no-move. A failure
+    # here leaves the others already done; report which, rather than pretend
+    # the whole thing succeeded.
+    done, failed = [], []
+    for agent, _count in present:
+        cmd = [agent["tool"], "--no-move", "-y", "--no-color", old, new]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode == 0:
+            done.append(agent["name"])
+            out.success(f"{agent['name']}: history repointed.")
+        else:
+            failed.append((agent, result))
+            out.warn(f"{agent['name']}: {agent['tool']} failed "
+                     f"(exit {result.returncode})")
+            for line in (result.stderr or "").strip().splitlines()[-6:]:
+                out.warn(f"    {line}")
+
+    if failed:
+        out.error(
+            "The directory was renamed and "
+            + (f"{', '.join(done)} updated, but " if done else "")
+            + f"{', '.join(a['name'] for a, _r in failed)} did not.\n"
+            + "  Re-run just that agent's tool with --no-move:\n"
+            + "\n".join(f"    {a['tool']} --no-move {old} {new}"
+                        for a, _r in failed))
+
+    out.success("Done.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
