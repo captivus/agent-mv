@@ -204,6 +204,34 @@ class DetectionTests(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("Destination already exists", r.stderr)
 
+    @unittest.skipUnless(have("codex-mv"), "codex-mv must be installed")
+    def test_uses_the_agents_own_session_description_when_it_has_one(self):
+        """A pid is not actionable; the terminal and conversation are.
+
+        codex-mv exposes describe_live(); agent-mv must use it rather than
+        falling back to listing raw pids.
+        """
+        f = Fixture(self.tmp)
+        fake_bin = os.path.join(self.tmp, "fakebin2")
+        os.makedirs(fake_bin, exist_ok=True)
+        fake = os.path.join(fake_bin, "codex")
+        with open(fake, "w") as fh:
+            fh.write("#!/bin/sh\nsleep 30\n")
+        os.chmod(fake, 0o755)
+        proc = subprocess.Popen([fake], cwd=f.old,
+                                stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL)
+        try:
+            time.sleep(0.4)
+            r = f.run("--dry-run")
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn("session(s)", r.stderr,
+                          "should use codex-mv's session grouping")
+            self.assertIn("process(es)", r.stderr)
+        finally:
+            proc.kill()
+            proc.wait()
+
     def test_refuses_while_an_agent_is_running_in_the_project(self):
         f = Fixture(self.tmp)
         fake_bin = os.path.join(self.tmp, "fakebin")

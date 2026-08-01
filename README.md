@@ -72,6 +72,24 @@ Planned actions:
 Dry-run complete - no changes made.
 ```
 
+## Session identification
+
+A pid is not actionable. When an agent's tool exposes `describe_live(target)`,
+`agent-mv` uses it, so the guard names the terminal, start time and
+conversation instead:
+
+```
+! An agent is running in this project - a real run would refuse:
+    Codex:
+    1 session(s), 3 process(es):
+      [1] pts/21  started 2026-07-28 14:47  pid 698721 (+2 more: 698728, 705721)
+          cwd     : /home/alice/projects/pickleball-league
+          session : 019f8035  last active 2026-08-01 13:50:49
+          about   : "Okay, so I am trying to design both branding and then the..."
+```
+
+Tools without that hook fall back to a plain pid listing.
+
 ## Safety
 
 - **Refuses if an agent's tool is missing** rather than moving the directory and

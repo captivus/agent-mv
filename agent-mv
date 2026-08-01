@@ -152,6 +152,32 @@ AGENTS = [
 
 
 # --------------------------------------------------------- live processes ----
+def tool_describe_live(tool, target):
+    """Ask an agent's own tool to describe its live sessions in `target`.
+
+    A tool may expose `describe_live(target)` returning a formatted string, or
+    None when nothing is live. codex-mv does, and its description names the
+    terminal, start time and conversation - far more useful than a pid. Any
+    failure here is not fatal: the caller falls back to listing pids.
+    """
+    path = shutil.which(tool)
+    if not path:
+        return None
+    try:
+        import importlib.machinery
+        import importlib.util
+        spec = importlib.util.spec_from_loader(
+            f"_agent_tool_{tool.replace('-', '_')}",
+            importlib.machinery.SourceFileLoader(
+                f"_agent_tool_{tool.replace('-', '_')}", path))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        describe = getattr(module, "describe_live", None)
+        return describe(target) if callable(describe) else None
+    except Exception:  # noqa: BLE001 - a bash tool, an old version, anything
+        return None
+
+
 def live_processes(target, names):
     """Agent processes working inside `target`.
 
@@ -254,14 +280,21 @@ def main(argv=None):
     # ------------------------------------------------------------ guards ----
     blocked = []
     for agent, _count in present:
+        # Prefer the agent's own description: it knows which terminal a
+        # session is on and what the conversation is about, which is what you
+        # need in order to close it. Fall back to raw pids otherwise.
+        rich = tool_describe_live(agent["tool"], old)
+        if rich:
+            # indent the delegated block under the agent's name
+            blocked.append((agent, "\n".join("  " + l for l in rich.splitlines())))
+            continue
         live = live_processes(old, agent["processes"])
         if live:
-            blocked.append((agent, live))
+            blocked.append((agent, "\n".join(
+                f"      pid {pid}: {cmd}" for pid, cmd in live)))
     if blocked:
-        detail = "\n".join(
-            f"    {agent['name']}:\n"
-            + "\n".join(f"      pid {pid}: {cmd}" for pid, cmd in live)
-            for agent, live in blocked)
+        detail = "\n".join(f"    {agent['name']}:\n{text}"
+                           for agent, text in blocked)
         if args.dry_run:
             out.warn("An agent is running in this project - "
                      f"a real run would refuse:\n{detail}")
