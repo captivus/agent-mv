@@ -158,5 +158,6 @@ drive the real `claude-mv` and `codex-mv` and assert that a renamed project's
 history follows it in both; they skip if those tools are not installed.
 
 The suite is mutation-tested: proceeding without a required tool, skipping the
-live-agent guard, and delegating to only the first agent each cause failures in
-the tests that should catch them.
+live-agent guard, delegating to only the first agent, and ignoring an agent's
+own session description each cause failures in the tests that should catch
+them.
