@@ -151,6 +151,12 @@ class DetectionTests(unittest.TestCase):
                          "-home-alice-my-project-v2")
         self.assertEqual(mod.claude_encode("/home/alice/Ray Dalio"),
                          "-home-alice-Ray-Dalio")
+        # every other non-alphanumeric character too, not just _ . and space
+        self.assertEqual(
+            mod.claude_encode("/home/a/OneDrive - X (via y.com)/316 S. 2nd St., LLC"),
+            "-home-a-OneDrive---X--via-y-com--316-S--2nd-St---LLC")
+        self.assertEqual(mod.claude_encode("/home/a/Nanette's Notes"),
+                         "-home-a-Nanette-s-Notes")
 
     def test_detects_only_the_agents_that_have_history(self):
         mod = agent_mv_module()

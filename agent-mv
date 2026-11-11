@@ -35,7 +35,7 @@ import shutil
 import subprocess
 import sys
 
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 
 
 # ---------------------------------------------------------------- output ----
@@ -84,10 +84,14 @@ def codex_home():
 
 
 def claude_encode(path):
-    """Claude Code's history directory name for a project path."""
-    for ch in "_. ":
-        path = path.replace(ch, "-")
-    return path.replace("/", "-")
+    """Claude Code's history directory name for a project path.
+
+    Claude replaces every character outside [A-Za-z0-9-] with "-" - not just
+    slashes, dots, underscores and spaces. Parentheses, commas, apostrophes
+    etc. all count, e.g. "OneDrive - Roark Labs (via x.com)".
+    """
+    import re
+    return re.sub(r"[^A-Za-z0-9-]", "-", path)
 
 
 def claude_history(old):
